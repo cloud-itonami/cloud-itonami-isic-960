@@ -104,7 +104,7 @@
 (defn advise-safety-concern
   "Generate safety concern escalation proposal.
   ALWAYS escalates to human review, never auto-commits."
-  [store facility-concern-type description severity]
+  [store concern-type description severity]
   {:operation :flag-safety-concern
    :concern-type concern-type
    :description description

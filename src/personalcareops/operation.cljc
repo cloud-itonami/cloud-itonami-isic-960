@@ -139,6 +139,7 @@
         after-decide (decide after-govern)
         final-state (case (:action after-decide)
                       :committed (commit after-decide)
+                      :escalate (escalate after-decide)
                       :escalated (escalate after-decide)
                       :hold (hold after-decide)
                       :request-approval (assoc after-decide :action :pending-approval)

@@ -21,26 +21,32 @@
 ;; ---------------------- hard checks ----------------------
 
 (defn client-unverified-violations
-  "Check 1: Client must be registered AND verified.
-  This is re-derived from the client's own :registered?/:verified? fields,
-  never from proposal self-report."
-  [store client-id]
-  (let [client (store/client store client-id)]
-    (cond
-      (nil? client)
-      [{:check/id :client-unverified
-        :violation "Client not found in store"}]
+  "Check 1: Client/target must be registered AND verified.
+  This is re-derived from the store, never from proposal self-report.
 
-      (not (:registered? client))
-      [{:check/id :client-unverified
-        :violation "Client is not registered"}]
+  Exception: :flag-safety-concern doesn't require client verification
+  (it's a facility-level concern that escalates to human review)."
+  [store op-id client-id]
+  ;; Safety concerns don't need client verification (facility-level)
+  (if (= op-id :flag-safety-concern)
+    []
+    ;; All other operations require client verification
+    (let [client (store/client store client-id)]
+      (cond
+        (nil? client)
+        [{:check/id :client-unverified
+          :violation "Client not found in store"}]
 
-      (not (:verified? client))
-      [{:check/id :client-unverified
-        :violation "Client is not verified"}]
+        (not (:registered? client))
+        [{:check/id :client-unverified
+          :violation "Client is not registered"}]
 
-      :else
-      [])))
+        (not (:verified? client))
+        [{:check/id :client-unverified
+          :violation "Client is not verified"}]
+
+        :else
+        []))))
 
 (defn effect-not-propose-violations
   "Check 2: Effect must be :propose. Any other effect is rejected outright."
@@ -96,7 +102,7 @@
          #"衛生.?認可"
          #"衛生.?監督"]
 
-        ;; Allowed operations that may legitimately mention facility/client concerns
+        ;; Allowed operations
         allowed-ops #{:schedule-service-appointment
                       :coordinate-service-status-update
                       :coordinate-supply-request
@@ -106,9 +112,16 @@
         op-id (:operation proposal)
         proposal-str (str proposal)
 
+        ;; Check 1: Operation must be in allowed list
+        op-not-allowed (not (allowed-ops op-id))
+
+        ;; Check 2: Content must not contain forbidden patterns
+        ;; (except :flag-safety-concern which is allowed to escalate)
+        content-forbidden (and (not= op-id :flag-safety-concern)
+                               (some #(re-find % proposal-str) forbidden-patterns))
+
         ;; Combine EN+JA checks into a single explicit boolean
-        in-forbidden-territory (and (not (allowed-ops op-id))
-                                     (some #(re-find % proposal-str) forbidden-patterns))]
+        in-forbidden-territory (or op-not-allowed content-forbidden)]
 
     (if in-forbidden-territory
       [{:check/id :scope-exclusion
@@ -121,7 +134,7 @@
   "Apply all three HARD checks. Any violation is a permanent rejection
   with no override path."
   [store proposal]
-  (let [client-violations (client-unverified-violations store (:client-id proposal))
+  (let [client-violations (client-unverified-violations store (:operation proposal) (:client-id proposal))
         effect-violations (effect-not-propose-violations proposal)
         scope-violations (scope-exclusion-violations proposal)
         all-violations (concat client-violations effect-violations scope-violations)]

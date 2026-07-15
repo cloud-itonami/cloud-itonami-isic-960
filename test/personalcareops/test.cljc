@@ -42,7 +42,7 @@
   (run-test-group "=== Governor Tests ===" (fn []
     (let [s (store/make-store)]
       (println "[1] Client unverified check")
-      (let [violations (governor/client-unverified-violations s "client-3")]
+      (let [violations (governor/client-unverified-violations s :schedule-service-appointment "client-3")]
         (assert (= 1 (count violations)))
         (assert (= :client-unverified (get-in violations [0 :check/id])))
         (println "    ✓ unverified client blocked"))
