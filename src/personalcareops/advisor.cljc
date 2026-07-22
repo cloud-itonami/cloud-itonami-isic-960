@@ -1,6 +1,7 @@
 (ns personalcareops.advisor
   "Proposal advisor for personal-care salon/service coordination.
-   DETERMINISTIC DEMO ONLY: production requires real LLM with prompt injection safeguards.")
+   DETERMINISTIC DEMO ONLY: production requires real LLM with prompt injection safeguards."
+  (:require [clojure.string :as str]))
 
 (defn advisability
   "Return advisability score (0–1) and reasoning for a proposal.
@@ -13,15 +14,24 @@
         is-shift? (= op :schedule-staff-shift-proposal)
         is-safety? (= op :flag-safety-concern)
 
+        ;; Was `.toLowerCase`/`.includes` -- JS-only String methods that
+        ;; ALWAYS threw on JVM Clojure (java.lang.String has no
+        ;; `.includes` method; `str/includes?` is the portable .cljc
+        ;; equivalent that works identically on :clj and :cljs). This
+        ;; meant every one of the five `advise-*` fns below crashed the
+        ;; instant a real StateGraph actually ran them on the JVM --
+        ;; the bare assert+println test harness never caught it because
+        ;; it always printed "All tests passed!" unconditionally. Same
+        ;; forbidden-word list, same case-insensitive substring check,
+        ;; now portable.
         has-forbidden-words?
-        (some #(and (string? content)
-                    (.toLowerCase (str content))
-                    (or (.includes (.toLowerCase (str content)) %)
-                        (.includes (str content) %)))
-              ["allergy" "prescription" "medication" "treatment-plan"
-               "health-condition" "medical-decision" "clinical-judgment"
-               "アレルギー" "処方" "薬剤" "治療計画"
-               "健康診断" "医学的判定" "臨床判断"])
+        (and (string? content)
+             (let [lc (str/lower-case content)]
+               (some #(str/includes? lc (str/lower-case %))
+                     ["allergy" "prescription" "medication" "treatment-plan"
+                      "health-condition" "medical-decision" "clinical-judgment"
+                      "アレルギー" "処方" "薬剤" "治療計画"
+                      "健康診断" "医学的判定" "臨床判断"])))
 
         score (cond
                 has-forbidden-words? 0.0

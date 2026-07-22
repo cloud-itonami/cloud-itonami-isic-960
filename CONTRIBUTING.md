@@ -7,13 +7,13 @@ Thank you for your interest in contributing to this actor!
 ### Running Tests
 
 ```bash
-nbb run-tests.cljs
+clojure -M:dev:test
 ```
 
 ### Running the Demo
 
 ```bash
-nbb -e "(require '[personalcareops.demo]) (personalcareops.demo/-main)"
+clojure -M:dev:run
 ```
 
 ## Code Organization
@@ -21,10 +21,10 @@ nbb -e "(require '[personalcareops.demo]) (personalcareops.demo/-main)"
 - `src/personalcareops/store.cljc` - Data store (SSoT)
 - `src/personalcareops/advisor.cljc` - Proposal advisor
 - `src/personalcareops/governor.cljc` - Safety decision logic
-- `src/personalcareops/operation.cljc` - State machine orchestration
+- `src/personalcareops/operation.cljc` - Real compiled `langgraph.graph` StateGraph orchestration
 - `src/personalcareops/phase.cljc` - Rollout phase control
-- `src/personalcareops/sim.cljc` - Simulation harness
-- `test/personalcareops/test.cljc` - Test suite
+- `src/personalcareops/sim.cljc` - Demo driver (runs the compiled StateGraph end-to-end)
+- `test/personalcareops/*_test.clj` - `clojure.test` suite (advisor, governor, phase, store, operation)
 
 ## Scope Guidelines
 
