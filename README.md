@@ -57,13 +57,13 @@ Every proposal must pass all three or be rejected outright:
 ### Tests
 
 ```bash
-nbb run-tests.cljs
+clojure -M:dev:test
 ```
 
 ### Demo
 
 ```bash
-nbb run-demo.clj
+clojure -M:dev:run
 ```
 
 ## Audit Trail
