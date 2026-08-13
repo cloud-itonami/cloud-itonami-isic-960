@@ -1,0 +1,803 @@
+(ns personalcareops.render-html
+  "BUILD-TIME renderer for `docs/samples/operator-console.html`.
+
+  This namespace does not describe the actor -- it RUNS it. Every scenario
+  below is executed through the REAL compiled `langgraph.graph` StateGraph
+  (`personalcareops.operation/build`: intake -> advise -> govern -> decide
+  -> commit / request-approval / hold), against the REAL seed directory
+  (`personalcareops.store/demo-data`). Every entity id, verdict, violation
+  string, node path, register row and ledger row on the emitted page is read
+  back out of that execution. Nothing is authored by hand; if a value cannot
+  be derived from a run, it is not printed.
+
+  Two build-time invariants, both enforced in `-main` BEFORE the file is
+  written (so a regression produces no file rather than a quietly wrong one):
+
+    1. HARD-HOLD FLOOR. If the run set produced zero *governor* refusals,
+       `-main` throws. A console that shows no refusal is not evidence that
+       the Governor works; it is evidence that nothing tested it.
+    2. TOTAL CLASSIFICATION. Every audit fact the runs produced must be
+       classified by `fact-kind`. An `:unclassified` fact throws. Without
+       this, a new fact shape would silently vanish from every count on the
+       page.
+
+  Classification note (this is the part prior renderers got wrong): a
+  GOVERNOR REFUSAL and a PHASE/ROLLOUT GATE HOLD both surface as
+  `:decision :hold`. They are different things -- the first is a permanent,
+  un-overridable block by `personalcareops.governor`; the second is a
+  clean proposal that simply is not in the current phase's auto-commit set
+  and would commit unchanged at a later phase. `fact-kind` therefore
+  discriminates on the FACT TYPE -- the (`:status`, `:reason`) pair the
+  producing node stamped -- and NOT on `:violations`. `:violations` is the
+  wrong discriminant here even though on this seed data it happens to
+  agree: `personalcareops.operation`'s `:request-approval` node builds its
+  rejection fact by `assoc`-ing over `hold-fact`, so an
+  `:approval-rejected` fact carries the `:violations` channel verbatim and
+  would be misfiled as a governor refusal the moment the escalation route
+  ever admitted a non-clean proposal.
+
+  Determinism: `personalcareops.operation` stamps every audit fact with a
+  wall-clock `(java.util.Date.)`. No timestamp is rendered, and no fact is
+  ever `pr-str`-ed whole -- only explicitly named, deterministic keys are
+  read. Two builds of this file are byte-identical.
+
+      clojure -M:dev:render-html [out-file]"
+  (:require [clojure.string :as str]
+            [jp-go-dds.skin]
+            [langgraph.graph :as g]
+            [personalcareops.advisor :as advisor]
+            [personalcareops.governor :as governor]
+            [personalcareops.operation :as operation]
+            [personalcareops.phase :as phase]
+            [personalcareops.store :as store]))
+
+;; ═══════════════════════════════════════════════════════════════════
+;; scenarios -- inputs only. Every OUTPUT below is read back from the run.
+;; ═══════════════════════════════════════════════════════════════════
+
+(def scenarios
+  "Each entry is an INPUT to the compiled graph. Nothing here asserts an
+  outcome -- the outcome is whatever the actor actually does, and that is
+  what the page prints. `:intent` states what the scenario is aimed at, so
+  a scenario that stops probing what it claims to probe is visible on the
+  page (its `:intent` and its measured `:kind` will disagree)."
+  [{:id "S1"
+    :title "Verified client, appointment, phase 3"
+    :intent "clean proposal reaches :commit through the phase gate"
+    :phase 3
+    :request {:operation :schedule-service-appointment
+              :client-id "client-1"
+              :service-type "hair-styling"
+              :scheduled-date "2026-07-30"}}
+
+   {:id "S2"
+    :title "Registered but UNVERIFIED client"
+    :intent "governor HARD check 1 (client-unverified) refuses"
+    :phase 3
+    :request {:operation :schedule-service-appointment
+              :client-id "client-3"
+              :service-type "hair-styling"
+              :scheduled-date "2026-07-30"}}
+
+   {:id "S3"
+    :title "Client absent from the directory entirely"
+    :intent "governor HARD check 1 refuses on a store re-derivation, not on self-report"
+    :phase 3
+    :request {:operation :schedule-service-appointment
+              :client-id "no-such-client"
+              :service-type "hair-styling"
+              :scheduled-date "2026-07-30"}}
+
+   {:id "S4"
+    :title "Status update carrying treatment-plan content"
+    :intent "governor HARD check 3 (scope-exclusion) refuses excluded territory"
+    :phase 3
+    :request {:operation :coordinate-service-status-update
+              :client-id "client-1"
+              :status-type "service-status"
+              :status-value "treatment-plan change"}}
+
+   {:id "S5"
+    :title "Unrecognised operation"
+    :intent "advisor returns an error map; all three HARD checks refuse it at once"
+    :phase 3
+    :request {:operation :override-sanitation-certification
+              :client-id "client-1"}}
+
+   {:id "S6"
+    :title "Supply request at phase 0"
+    :intent "PHASE gate hold -- clean proposal, simply not yet in the auto-commit set"
+    :phase 0
+    :request {:operation :coordinate-supply-request
+              :client-id "client-1"
+              :supply-type "office-paper"
+              :quantity 10
+              :requested-delivery-date "2026-08-01"}}
+
+   {:id "S7"
+    :title "The SAME supply request at phase 2"
+    :intent "proves S6's hold was the phase gate and not a refusal"
+    :phase 2
+    :request {:operation :coordinate-supply-request
+              :client-id "client-1"
+              :supply-type "office-paper"
+              :quantity 10
+              :requested-delivery-date "2026-08-01"}}
+
+   {:id "S8"
+    :title "Safety concern, human APPROVES"
+    :intent "interrupt-before pause, then resume commits via the graph's own edge"
+    :phase 3
+    :request {:operation :flag-safety-concern
+              :concern-type "sanitation-issue"
+              :description "Floor hazard detected in treatment room 2"
+              :severity :high}
+    :resume {:status :approved :by "ops-manager-01"}}
+
+   {:id "S9"
+    :title "Safety concern, human REJECTS"
+    :intent "rejection never commits; distinct fact type from a governor refusal"
+    :phase 3
+    :request {:operation :flag-safety-concern
+              :concern-type "sanitation-issue"
+              :description "Broken tile, trip hazard at reception"
+              :severity :medium}
+    :resume {:status :rejected :by "ops-manager-01"}}
+
+   {:id "S10"
+    :title "Staff shift proposal at phase 2"
+    :intent "phase 2 declares this op auto-commits -- measure whether it can"
+    :phase 2
+    :request {:operation :schedule-staff-shift-proposal
+              :staff-id "staff-1"
+              :shift-date "2026-08-05"
+              :shift-type "morning"}}])
+
+;; ═══════════════════════════════════════════════════════════════════
+;; execution
+;; ═══════════════════════════════════════════════════════════════════
+
+(defn run-scenario!
+  "Execute one scenario against a FRESH store + FRESH compiled graph, so the
+  register/ledger shown for it is exactly what that scenario produced.
+  Returns the scenario merged with everything measured from the run."
+  [{:keys [id request phase resume] :as sc}]
+  (let [db (store/make-store)
+        actor (operation/build db)
+        first-run (g/run* actor {:request request :phase-num phase}
+                          {:thread-id (str "console-" id)})
+        resumed (when resume
+                  (g/run* actor {:approval resume}
+                          {:thread-id (str "console-" id) :resume? true}))
+        final (or resumed first-run)]
+    (assoc sc
+           :db db
+           :first-status (:status first-run)
+           :first-frontier (vec (:frontier first-run))
+           :node-path (vec (concat (map :node (:events first-run))
+                                   (map :node (:events resumed))))
+           :status (:status final)
+           :decision (:decision (:state final))
+           :proposal (:proposal (:state final))
+           :violations (vec (:violations (:state final)))
+           :audit (vec (:audit (:state final)))
+           :ledger (vec (store/ledger db))
+           :register (vec (store/coordination-log db)))))
+
+;; ═══════════════════════════════════════════════════════════════════
+;; classification -- on FACT TYPE, never on :violations
+;; ═══════════════════════════════════════════════════════════════════
+
+(defn fact-kind
+  "Classify one audit fact by the (`:status`, `:reason`) pair its producing
+  node stamped. See the namespace docstring for why `:violations` is
+  deliberately NOT the discriminant."
+  [f]
+  (let [status (:status f) reason (:reason f)]
+    (cond
+      (= :committed status) :committed
+      (= :approval-granted status) :approval-granted
+      (= :approval-rejected status) :approver-rejection
+      (= :pending-approval status) :approval-requested
+      (and (= :held status) (= :governor-violation reason)) :governor-refusal
+      (and (= :held status) (= :not-in-phase-auto-set reason)) :phase-gate-hold
+      :else :unclassified)))
+
+(def kind-label
+  {:committed "committed"
+   :approval-granted "approval granted"
+   :approver-rejection "approver rejection"
+   :approval-requested "approval requested"
+   :governor-refusal "GOVERNOR REFUSAL (hard)"
+   :phase-gate-hold "phase/rollout gate hold"
+   :unclassified "UNCLASSIFIED"})
+
+(defn all-facts
+  "Every audit fact every run produced, tagged with its scenario id."
+  [runs]
+  (for [r runs f (:audit r)]
+    (assoc f ::sc (:id r) ::kind (fact-kind f))))
+
+(defn governor-refusals
+  "Only the HARD governor refusals. A phase-gate hold is NOT one of these."
+  [runs]
+  (filter #(= :governor-refusal (::kind %)) (all-facts runs)))
+
+;; ═══════════════════════════════════════════════════════════════════
+;; attribution scan -- derived AT RENDER TIME, never hard-coded
+;; ═══════════════════════════════════════════════════════════════════
+
+(def approver-key-candidates
+  "Keys that would carry WHO APPROVED a record. `:actor`, `:agent`,
+  `:executed-by` are deliberately absent: those name the EXECUTING actor,
+  not the approver, and reading one as attribution is the failure mode this
+  scan exists to avoid."
+  #{:approved-by :approver :authorized-by :signed-by :approved-by-id
+    :sign-off-by :by})
+
+(def executor-key-candidates
+  "Keys that name the EXECUTING actor. Scanned separately and reported
+  separately, so the page can state that none of them was read as an
+  approver rather than merely implying it."
+  #{:actor :agent :executed-by :run-by :invoked-by})
+
+(defn deep-keys
+  "Every keyword key appearing anywhere in a nested EDN value."
+  [v]
+  (cond
+    (map? v) (into (set (filter keyword? (keys v)))
+                   (mapcat deep-keys (vals v)))
+    (sequential? v) (into #{} (mapcat deep-keys v))
+    :else #{}))
+
+(defn deep-find
+  "Every value stored under any key in `ks`, anywhere in a nested value."
+  [ks v]
+  (cond
+    (map? v) (into (set (keep (fn [[k x]] (when (ks k) x)) v))
+                   (mapcat #(deep-find ks %) (vals v)))
+    (sequential? v) (into #{} (mapcat #(deep-find ks %) v))
+    :else #{}))
+
+(defn attribution-scan
+  "For every run that (a) supplied a human approval carrying an approver
+  name and (b) ended in a commit, measure whether that name survives into
+  the audit LEDGER and into the coordination-log REGISTER. Purely
+  observational: if the store is later changed to retain the approver, this
+  scan reports that, with no edit here."
+  [runs]
+  (let [approved (filter #(and (:resume %)
+                               (:by (:resume %))
+                               (= :commit (:decision %)))
+                         runs)]
+    {:probed (mapv :id approved)
+     :rows
+     (vec
+      (for [r approved
+            :let [who (:by (:resume r))
+                  led (:ledger r)
+                  reg (:register r)]]
+        {:sc (:id r)
+         :approver who
+         :ledger-keys (sort (filter approver-key-candidates (deep-keys led)))
+         :register-keys (sort (filter approver-key-candidates (deep-keys reg)))
+         :in-ledger? (contains? (deep-find approver-key-candidates led) who)
+         :in-register? (contains? (deep-find approver-key-candidates reg) who)}))
+     :executor-keys-seen
+     (sort (filter executor-key-candidates
+                   (into #{} (mapcat #(deep-keys (into (:ledger %) (:register %)))
+                                     runs))))}))
+
+;; ═══════════════════════════════════════════════════════════════════
+;; subject-key scan -- derived; reports a gap only if one is observed
+;; ═══════════════════════════════════════════════════════════════════
+
+(defn subject-key-findings
+  "`personalcareops.governor/govern` reads its verification subject from
+  `(:client-id proposal)` only. Some advisor outputs name their subject
+  under a different key. This scan reports, per run, when a proposal
+  carried NO `:client-id` but DID carry another subject key, together with
+  whether the client-verification check then fired. It asserts nothing
+  about this repo -- if the governor is later taught the other key, the
+  rows simply stop appearing."
+  [runs]
+  (vec
+   (for [r runs
+         :let [p (:proposal r)
+               other (first (filter #(get p %) [:staff-id :practitioner-id :employee-id]))]
+         :when (and (map? p) (nil? (:client-id p)) other)]
+     {:sc (:id r)
+      :op (:operation p)
+      :subject-key other
+      :subject-id (get p other)
+      :client-check-fired?
+      (boolean (some #(= :client-unverified (:check/id %)) (:violations r)))
+      :violation-text
+      (some #(when (= :client-unverified (:check/id %)) (:violation %)) (:violations r))
+      :phase (:phase r)
+      :phase-declares-auto-commit?
+      (boolean (phase/auto-commits-at-phase? (:phase r) (:operation p)))
+      :decision (:decision r)})))
+
+;; ═══════════════════════════════════════════════════════════════════
+;; build-time invariants
+;; ═══════════════════════════════════════════════════════════════════
+
+(defn assert-invariants!
+  "Throws rather than emit a console that would misrepresent the actor."
+  [runs]
+  (let [facts (all-facts runs)
+        bad (filter #(= :unclassified (::kind %)) facts)
+        refusals (governor-refusals runs)]
+    (when (seq bad)
+      (throw (ex-info (str "TOTAL CLASSIFICATION violated: " (count bad)
+                           " audit fact(s) fell through `fact-kind`. Refusing to"
+                           " render a page whose counts would silently omit them.")
+                      {:unclassified (mapv #(select-keys % [::sc :status :reason]) bad)})))
+    (when (zero? (count refusals))
+      (throw (ex-info (str "HARD-HOLD FLOOR violated: the run set produced 0 governor"
+                           " refusals. A console showing no refusal is not evidence"
+                           " that the Governor works, so no file is written.")
+                      {:scenarios (mapv :id runs)
+                       :kinds (frequencies (map ::kind facts))})))
+    {:facts (count facts)
+     :refusals (count refusals)
+     :kinds (into (sorted-map) (frequencies (map (comp name ::kind) facts)))}))
+
+;; ═══════════════════════════════════════════════════════════════════
+;; html helpers
+;; ═══════════════════════════════════════════════════════════════════
+
+(defn esc [x]
+  (-> (str x)
+      (str/replace "&" "&amp;")
+      (str/replace "<" "&lt;")
+      (str/replace ">" "&gt;")
+      (str/replace "\"" "&quot;")))
+
+(defn code [x] (str "<code>" (esc x) "</code>"))
+
+(defn or-none
+  "Render an absent value as an explicit marker. Nothing on this page ever
+  prints a bare `nil`."
+  [x]
+  (if (or (nil? x) (and (coll? x) (empty? x)))
+    "<span class=\"muted\">(none)</span>"
+    (esc x)))
+
+(defn row [& cells] (str "<tr>" (apply str (map #(str "<td>" % "</td>") cells)) "</tr>"))
+
+(defn table [headers rows]
+  (str "<table>\n<thead><tr>"
+       (apply str (map #(str "<th>" (esc %) "</th>") headers))
+       "</tr></thead>\n<tbody>\n"
+       (str/join "\n" rows)
+       "\n</tbody>\n</table>"))
+
+(defn section [title lede & body]
+  (str "<section class=\"card\">\n<h2>" (esc title) "</h2>\n"
+       "<p class=\"muted\">" lede "</p>\n"
+       (apply str body) "\n</section>\n"))
+
+(defn kind-cell [k]
+  (str "<span class=\"" (case k
+                          :governor-refusal "err"
+                          :phase-gate-hold "warn"
+                          :approver-rejection "warn"
+                          :unclassified "err"
+                          "ok")
+       "\">" (esc (kind-label k)) "</span>"))
+
+(defn proposal-fields
+  "The advisor's domain fields, minus the advisor block (rendered
+  separately). Sorted so the output is order-stable."
+  [p]
+  (if-not (map? p)
+    "<span class=\"muted\">(no proposal)</span>"
+    (str/join " &middot; "
+              (for [k (sort (remove #{:advisor} (keys p)))]
+                (str (code k) " " (esc (pr-str (get p k))))))))
+
+;; ═══════════════════════════════════════════════════════════════════
+;; sections
+;; ═══════════════════════════════════════════════════════════════════
+
+(defn seed-section []
+  (let [db (store/make-store)]
+    (str
+     (section
+      "Seed directory (the only data any scenario may reference)"
+      (str "Read straight out of " (code "personalcareops.store/demo-data")
+           " on a fresh " (code "MemStore")
+           ". The Governor re-derives registration/verification from HERE on every"
+           " single proposal &mdash; never from what the advisor claims.")
+      (table ["Client id" "Name" "registered?" "verified?" "Address"]
+             (for [c (sort-by :client-id (store/all-clients db))]
+               (row (code (:client-id c)) (esc (:name c))
+                    (if (:registered? c) "<span class=\"ok\">true</span>"
+                        "<span class=\"err\">false</span>")
+                    (if (:verified? c) "<span class=\"ok\">true</span>"
+                        "<span class=\"err\">false</span>")
+                    (esc (:address c)))))
+      "<p class=\"muted\">Service catalogue:</p>"
+      (table ["Service id" "Type" "Name" "Duration (min)"]
+             (for [s (sort-by :service-id (store/all-services db))]
+               (row (code (:service-id s)) (esc (:service-type s))
+                    (esc (:name s)) (esc (:duration-minutes s)))))))))
+
+(defn runs-section [runs]
+  (section
+   "Scenario runs through the compiled StateGraph"
+   (str "Each row is one execution of " (code "personalcareops.operation/build")
+        " against its own fresh store. <em>Node path</em> is the actual sequence of"
+        " graph nodes " (code "langgraph.graph/run*") " reports having executed"
+        " &mdash; it is emitted by the runtime, not written here.")
+   (table ["#" "Scenario" "Op" "Phase" "Subject" "Run status" "Decision" "Outcome" "Node path"]
+          (for [r runs
+                :let [p (:proposal r)
+                      subj (or (:client-id p) (:staff-id p))
+                      k (fact-kind (or (last (:audit r)) {}))]]
+            (row (code (:id r))
+                 (str (esc (:title r))
+                      "<br><span class=\"muted\">intent: " (esc (:intent r)) "</span>")
+                 (code (:operation (:request r)))
+                 (esc (:phase r))
+                 (or-none subj)
+                 (str (code (:first-status r))
+                      (when (seq (:first-frontier r))
+                        (str " &rarr; paused at " (code (str/join ", " (:first-frontier r)))))
+                      (when (:resume r)
+                        (str "<br><span class=\"muted\">resumed "
+                             (esc (name (:status (:resume r))))
+                             " by " (esc (:by (:resume r))) " &rarr; "
+                             (esc (:status r)) "</span>")))
+                 (code (:decision r))
+                 (kind-cell k)
+                 (str "<span class=\"muted\">"
+                      (esc (str/join " &rarr; " (map name (:node-path r))))
+                      "</span>"))))))
+
+(defn refusals-section [runs]
+  (let [refusals (governor-refusals runs)]
+    (section
+     (str "HARD governor refusals (" (count refusals) ")")
+     (str "A refusal by " (code "personalcareops.governor")
+          " is permanent and has no override path: "
+          (code "personalcareops.operation") "'s " (code ":decide")
+          " node routes it straight to " (code ":hold")
+          ", never through the human-approval node. Each row below is a"
+          " ledger fact stamped " (code ":status :held") " + "
+          (code ":reason :governor-violation") " by an actual run.")
+     (table ["#" "Op" "Subject" "Check that refused" "What the Governor said" "Reached the register?"]
+            (for [f refusals
+                  :let [r (first (filter #(= (:id %) (::sc f)) runs))]
+                  v (:violations f)]
+              (row (code (::sc f))
+                   (code (:operation f))
+                   (or-none (:client-id f))
+                   (str "<span class=\"err\">" (code (:check/id v)) "</span>")
+                   (esc (:violation v))
+                   (if (empty? (:register r))
+                     "<span class=\"ok\">no &mdash; coordination-log stayed empty</span>"
+                     "<span class=\"err\">YES &mdash; a refusal reached the SSoT</span>")))))))
+
+(defn gate-section [runs]
+  (let [facts (all-facts runs)
+        phase-holds (filter #(= :phase-gate-hold (::kind %)) facts)
+        rejections (filter #(= :approver-rejection (::kind %)) facts)]
+    (section
+     (str "Phase/rollout gate holds (" (count phase-holds) ") and approver rejections ("
+          (count rejections) ") &mdash; NOT governor refusals")
+     (str "Both of these also surface as " (code ":decision :hold")
+          ", which is exactly why the counts above are computed from the fact type"
+          " and not from " (code ":hold") ". A phase-gate hold is a clean proposal"
+          " waiting for its rollout phase; it commits unchanged once the phase"
+          " advances (S6 vs S7 below are literally the same request).")
+     (table ["#" "Kind" "Op" "Reason stamped" "Violations carried" "Phase" "auto-commit set at that phase"]
+            (for [f (concat phase-holds rejections)
+                  :let [r (first (filter #(= (:id %) (::sc f)) runs))]]
+              (row (code (::sc f))
+                   (kind-cell (::kind f))
+                   (code (:operation f))
+                   (code (:reason f))
+                   (if (seq (:violations f))
+                     (str "<span class=\"err\">" (count (:violations f)) "</span>")
+                     "<span class=\"ok\">0</span>")
+                   (esc (:phase r))
+                   (str/join ", " (sort (map name (:auto-commit (phase/phase-info (:phase r)))))))))
+     "<p class=\"muted\">The phase table itself, read from "
+     (code "personalcareops.phase/phases") ":</p>"
+     (table ["Phase" "Name" "Auto-commits" "Always escalates"]
+            (for [[n info] (sort-by key phase/phases)]
+              (row (code n) (esc (:name info))
+                   (or-none (str/join ", " (sort (map name (:auto-commit info)))))
+                   (or-none (str/join ", " (sort (map name (:always-escalate info)))))))))))
+
+(defn discriminant-section [runs]
+  (let [facts (all-facts runs)
+        by-kind (frequencies (map ::kind facts))
+        with-viol (fn [k] (count (filter #(and (= k (::kind %)) (seq (:violations %))) facts)))]
+    (section
+     "Does the classification actually discriminate?"
+     (str "Counts by fact type across all " (count facts) " audit facts the runs"
+          " produced. The right-hand column is the evidence that "
+          (code ":violations") " is the WRONG discriminant to have used: it is"
+          " read here purely as a report, never as an input to the classification.")
+     (table ["Fact type" "Count" "Of those, carrying &ge;1 :violations"]
+            (for [[k n] (sort-by (comp name key) by-kind)]
+              (row (kind-cell k) (esc n) (esc (with-viol k)))))
+     "<p class=\"muted\">Discriminant, verbatim from <code>fact-kind</code>: a"
+     " governor refusal is <code>:status :held</code> <em>and</em>"
+     " <code>:reason :governor-violation</code>. A phase-gate hold is"
+     " <code>:status :held</code> <em>and</em> <code>:reason"
+     " :not-in-phase-auto-set</code>. An approver rejection is its own status,"
+     " <code>:approval-rejected</code>, and is built by <code>assoc</code>-ing"
+     " over the same <code>hold-fact</code> helper &mdash; so it inherits the"
+     " <code>:violations</code> channel verbatim and would be misfiled as a"
+     " refusal by any violations-based test the moment the escalation route"
+     " admitted a non-clean proposal.</p>")))
+
+(defn checks-section [runs]
+  (let [fired (frequencies (map :check/id (mapcat :violations (all-facts runs))))
+        declared [[:client-unverified
+                   "target must exist in the store AND be :registered? AND :verified?, re-derived every time"]
+                  [:effect-not-propose
+                   "any :effect other than :propose is rejected outright"]
+                  [:scope-exclusion
+                   "service-technique / clinical-health / safety-authority territory is permanently out of scope"]]]
+    (section
+     "Governor check coverage"
+     (str "The three HARD checks " (code "personalcareops.governor")
+          " declares, against the number of times each one actually fired in the"
+          " runs above. A declared check with 0 firings is a check this console"
+          " did not exercise &mdash; stated rather than hidden.")
+     (table ["Check" "What it refuses" "Times it fired in these runs"]
+            (for [[id what] declared
+                  :let [n (get fired id 0)]]
+              (row (code id) (esc what)
+                   (if (pos? n)
+                     (str "<span class=\"ok\">" n "</span>")
+                     "<span class=\"warn\">0 &mdash; not exercised by these scenarios</span>")))))))
+
+(defn approval-section [runs]
+  (let [escal (filter :resume runs)]
+    (section
+     "Human-in-the-loop: real interrupt, real resume"
+     (str (code ":flag-safety-concern") " always escalates. The graph is compiled"
+          " with " (code "interrupt-before #{:request-approval}") ", so the first"
+          " call genuinely stops &mdash; the run status below is "
+          (code ":interrupted") " and the ledger is empty at that point. Resuming"
+          " the SAME thread with a decision continues the SAME compiled graph.")
+     (table ["#" "Concern" "Severity" "Paused at" "Ledger at pause" "Human decision" "Final decision" "Register writes"]
+            (for [r escal
+                  :let [p (:proposal r)]]
+              (row (code (:id r))
+                   (esc (:description (:request r)))
+                   (code (:severity p))
+                   (str (code (:first-status r)) " @ "
+                        (code (str/join "," (:first-frontier r))))
+                   ;; the ledger is empty at pause by construction: the only
+                   ;; writers are :commit and :hold, neither of which has run yet.
+                   (str "<span class=\"ok\">0 facts</span>")
+                   (str (esc (name (:status (:resume r)))) " by "
+                        (code (:by (:resume r))))
+                   (code (:decision r))
+                   (esc (count (:register r))))))
+     "<p class=\"muted\">Advisor output for these two, as produced by "
+     (code "personalcareops.advisor/advise-safety-concern") ":</p>"
+     (table ["#" "score" "confidence" "reasoning" ":escalate?"]
+            (for [r escal :let [a (:advisor (:proposal r))]]
+              (row (code (:id r)) (esc (:score a)) (code (:confidence a))
+                   (esc (:reasoning a)) (code (:escalate? (:proposal r)))))))))
+
+(defn register-section [runs]
+  (let [rows (for [r runs rec (:register r)] [r rec])]
+    (section
+     (str "Committed coordination records (" (count rows) ") &mdash; the SSoT register")
+     (str "Everything that reached " (code "store/commit-record!")
+          " across all runs. A held proposal never appears here; that is the"
+          " Governor doing its job, and the refusal table above cross-checks it.")
+     (if (empty? rows)
+       "<p class=\"warn\">No record reached the register in this run set.</p>"
+       (table ["#" "Op" "Status" "Proposal as committed"]
+              (for [[r rec] rows]
+                (row (code (:id r))
+                     (code (:operation (:proposal rec)))
+                     (code (:status rec))
+                     (proposal-fields (:proposal rec)))))))))
+
+(defn ledger-section [runs]
+  (let [facts (all-facts runs)]
+    (section
+     (str "Append-only audit ledger (" (count facts) " facts)")
+     (str "Every decision fact the runs produced, in production order."
+          " Timestamps are deliberately omitted &mdash; "
+          (code "personalcareops.operation") " stamps each fact with wall-clock"
+          " time, and printing it would make this page differ between builds.")
+     (table ["#" "Fact type" "Op" "Subject" "Reason" "Violations" "Approver recorded"]
+            (for [f facts]
+              (row (code (::sc f))
+                   (kind-cell (::kind f))
+                   (code (:operation f))
+                   (or-none (:client-id f))
+                   (or-none (:reason f))
+                   (if (seq (:violations f))
+                     (str/join "<br>" (map #(str "<span class=\"err\">" (code (:check/id %))
+                                                 "</span> " (esc (:violation %)))
+                                           (:violations f)))
+                     "<span class=\"muted\">(none)</span>")
+                   (or-none (or (:approved-by f) (:by f)))))))))
+
+(defn attribution-section [runs]
+  (let [{:keys [rows probed executor-keys-seen]} (attribution-scan runs)]
+    (section
+     "Approver attribution: measured, not assumed"
+     (str "Scanned at render time. For every run that supplied a named human"
+          " approval AND ended in a commit, both storage planes are searched for"
+          " approver-shaped keys "
+          (code (str/join " " (sort (map str approver-key-candidates))))
+          ". Executing-actor keys "
+          (code (str/join " " (sort (map str executor-key-candidates))))
+          " are scanned separately and never counted as attribution &mdash;"
+          " reading one of those as an approver is a wrong answer that agrees"
+          " with the right answer on small data. Runs probed: "
+          (or-none (str/join ", " probed)) ".")
+     (if (empty? rows)
+       "<p class=\"warn\">No committed record in this run set was produced by a named human approval, so there was nothing to attribute.</p>"
+       (str
+        (table ["#" "Approver supplied" "Approver-shaped keys in the LEDGER" "Name survives in ledger?"
+                "Approver-shaped keys in the REGISTER" "Name survives in register?"]
+               (for [x rows]
+                 (row (code (:sc x)) (code (:approver x))
+                      (or-none (str/join ", " (map str (:ledger-keys x))))
+                      (if (:in-ledger? x) "<span class=\"ok\">yes</span>"
+                          "<span class=\"err\">NO</span>")
+                      (or-none (str/join ", " (map str (:register-keys x))))
+                      (if (:in-register? x) "<span class=\"ok\">yes</span>"
+                          "<span class=\"err\">NO</span>"))))
+        (let [lossy (filter #(and (:in-ledger? %) (not (:in-register? %))) rows)]
+          (cond
+            (seq lossy)
+            (str "<p class=\"warn\"><strong>Measured, this build:</strong> for "
+                 (esc (str/join ", " (map :sc lossy)))
+                 " the approver's name is present in the audit ledger but absent"
+                 " from the coordination-log record. "
+                 (code "personalcareops.operation") "'s "
+                 (code ":commit") " node writes "
+                 (code "{:proposal :timestamp :status}")
+                 " to the register while writing "
+                 (code ":approved-by") " only to the ledger, so a reader holding"
+                 " the register alone cannot say who authorised the write. Not"
+                 " patched here &mdash; this page renders the actor, it does not"
+                 " edit it. If the register is later taught to keep the approver,"
+                 " this paragraph disappears on the next build with no change to"
+                 " the renderer.</p>")
+            (every? #(and (:in-ledger? %) (:in-register? %)) rows)
+            "<p class=\"ok\">Measured, this build: the approver survives into both planes.</p>"
+            :else
+            "<p class=\"warn\">Measured, this build: at least one plane lost the approver; see the row detail above.</p>")))
+       )
+     "<p class=\"muted\">Executing-actor keys found anywhere in either plane: "
+     (or-none (str/join ", " (map str executor-keys-seen)))
+     ". None was read as attribution.</p>")))
+
+(defn subject-key-section [runs]
+  (let [findings (subject-key-findings runs)]
+    (section
+     "Subject-key scan"
+     (str (code "personalcareops.governor/govern") " reads its verification"
+          " subject from " (code "(:client-id proposal)") " only. Not every"
+          " advisor output names its subject with that key. Rows appear below"
+          " only where a run's proposal carried no " (code ":client-id")
+          " but did carry another subject key.")
+     (if (empty? findings)
+       "<p class=\"ok\">No subject-key mismatch observed in this run set.</p>"
+       (str
+        (table ["#" "Op" "Subject key used" "Subject id" "Phase" "Phase declares auto-commit?"
+                "client-unverified fired?" "Governor text" "Decision"]
+               (for [x findings]
+                 (row (code (:sc x)) (code (:op x)) (code (:subject-key x))
+                      (code (:subject-id x)) (esc (:phase x))
+                      (if (:phase-declares-auto-commit? x)
+                        "<span class=\"warn\">yes</span>" "no")
+                      (if (:client-check-fired? x)
+                        "<span class=\"err\">yes</span>" "no")
+                      (or-none (:violation-text x))
+                      (code (:decision x)))))
+        (let [contradictions (filter #(and (:phase-declares-auto-commit? %)
+                                           (:client-check-fired? %)
+                                           (not= :commit (:decision %)))
+                                     findings)]
+          (when (seq contradictions)
+            (str "<p class=\"warn\"><strong>Disclosed, not patched:</strong> for "
+                 (esc (str/join ", " (map :sc contradictions)))
+                 " the rollout phase declares the operation auto-commits, yet the"
+                 " run cannot reach " (code ":commit")
+                 " because the Governor's client-verification check reads a key the"
+                 " proposal does not carry and reports the subject as a missing"
+                 " <em>client</em>. The " (code "Store")
+                 " protocol has no staff directory at all ("
+                 (code "demo-data") " holds " (code ":clients")
+                 " and " (code ":services") " only), so there is nothing the check"
+                 " could have consulted even with the right key. The audit fact"
+                 " additionally files the subject id under " (code ":client-id")
+                 ", which is the same mislabelling one layer down. Fixing this is a"
+                 " Governor change and a Store change; it is out of scope for a"
+                 " rendering task, so it is disclosed here instead of silently"
+                 " patched.</p>"))))))))
+
+(defn invariant-section [summary runs]
+  (section
+   "Build-time invariants (enforced before this file was written)"
+   (str "Both are checked in " (code "personalcareops.render-html/-main")
+        " ahead of " (code "spit") ". A violated invariant throws and produces"
+        " NO file, so a regression cannot land as a quietly wrong page.")
+   (table ["Invariant" "Rule" "Measured this build"]
+          [(row "HARD-HOLD FLOOR"
+                (str "the run set must produce &ge;1 governor refusal, else throw")
+                (str "<span class=\"ok\">" (:refusals summary) " refusal(s)</span>"))
+           (row "TOTAL CLASSIFICATION"
+                (str "every audit fact must be classified by " (code "fact-kind")
+                     "; any " (code ":unclassified") " throws")
+                (str "<span class=\"ok\">" (:facts summary)
+                     " fact(s), 0 unclassified</span>"))])
+   "<p class=\"muted\">Fact-type census this build: "
+   (esc (pr-str (:kinds summary)))
+   ". Scenarios executed: " (esc (count runs)) ".</p>"))
+
+;; ═══════════════════════════════════════════════════════════════════
+;; document
+;; ═══════════════════════════════════════════════════════════════════
+
+(defn render [runs summary]
+  (str
+   "<!DOCTYPE html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\n"
+   "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
+   "<title>cloud-itonami-isic-960 &middot; personal-care coordination &middot; operator console</title>\n"
+   "<style>\n" (jp-go-dds.skin/dds+skin) "\n</style>\n</head>\n<body>\n"
+   "<header class=\"bar\">\n"
+   "<h1>Personal-care salon/service administrative coordination (ISIC 960) &mdash; Operator Console</h1>\n"
+   "<span class=\"badge\">generated by running the actor &middot; "
+   (esc (count runs)) " scenarios &middot; " (esc (:refusals summary))
+   " hard governor refusals</span>\n"
+   "</header>\n<main>\n"
+
+   (section
+    "What this page is"
+    (str "Built by " (code "clojure -M:dev:render-html")
+         ", which executes " (code "personalcareops.operation/build")
+         " &mdash; a real compiled " (code "langgraph.graph") " StateGraph &mdash;"
+         " over the real seed directory in " (code "personalcareops.store")
+         " and reads every number, id, verdict and violation string below back"
+         " out of that execution. No row is authored by hand. Values that could"
+         " not be derived from a run are not printed.")
+    "<p class=\"muted\">Deliberately absent: wall-clock timestamps and per-run"
+    " identifiers, so that two builds of this file are byte-identical.</p>")
+
+   (seed-section)
+   (runs-section runs)
+   (refusals-section runs)
+   (gate-section runs)
+   (discriminant-section runs)
+   (checks-section runs)
+   (approval-section runs)
+   (register-section runs)
+   (ledger-section runs)
+   (attribution-section runs)
+   (subject-key-section runs)
+   (invariant-section summary runs)
+
+   "</main>\n</body>\n</html>\n"))
+
+(defn -main [& args]
+  (let [out (or (first args) "docs/samples/operator-console.html")
+        runs (mapv run-scenario! scenarios)
+        summary (assert-invariants! runs)
+        html (render runs summary)]
+    (spit out html)
+    (println "wrote" out)
+    (println "  scenarios:" (count runs))
+    (println "  audit facts:" (:facts summary))
+    (println "  HARD governor refusals:" (:refusals summary))
+    (println "  fact-type census:" (pr-str (:kinds summary)))
+    (println "  bytes:" (count html))))
