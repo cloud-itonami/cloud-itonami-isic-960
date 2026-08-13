@@ -45,8 +45,6 @@
   (:require [clojure.string :as str]
             [jp-go-dds.skin]
             [langgraph.graph :as g]
-            [personalcareops.advisor :as advisor]
-            [personalcareops.governor :as governor]
             [personalcareops.operation :as operation]
             [personalcareops.phase :as phase]
             [personalcareops.store :as store]))
@@ -453,8 +451,11 @@
                              (esc (:status r)) "</span>")))
                  (code (:decision r))
                  (kind-cell k)
+                 ;; NOTE: a literal U+2192, not `&rarr;`. This string is the
+                 ;; argument to `esc`, which escapes `&` -- an entity written
+                 ;; here would reach the page as the visible text "&rarr;".
                  (str "<span class=\"muted\">"
-                      (esc (str/join " &rarr; " (map name (:node-path r))))
+                      (esc (str/join " → " (map name (:node-path r))))
                       "</span>"))))))
 
 (defn refusals-section [runs]
@@ -486,8 +487,9 @@
         phase-holds (filter #(= :phase-gate-hold (::kind %)) facts)
         rejections (filter #(= :approver-rejection (::kind %)) facts)]
     (section
+     ;; literal U+2014 -- `section` passes its title through `esc`
      (str "Phase/rollout gate holds (" (count phase-holds) ") and approver rejections ("
-          (count rejections) ") &mdash; NOT governor refusals")
+          (count rejections) ") — NOT governor refusals")
      (str "Both of these also surface as " (code ":decision :hold")
           ", which is exactly why the counts above are computed from the fact type"
           " and not from " (code ":hold") ". A phase-gate hold is a clean proposal"
@@ -523,7 +525,8 @@
           " produced. The right-hand column is the evidence that "
           (code ":violations") " is the WRONG discriminant to have used: it is"
           " read here purely as a report, never as an input to the classification.")
-     (table ["Fact type" "Count" "Of those, carrying &ge;1 :violations"]
+     ;; literal U+2265 -- `table` passes its headers through `esc`
+     (table ["Fact type" "Count" "Of those, carrying ≥1 :violations"]
             (for [[k n] (sort-by (comp name key) by-kind)]
               (row (kind-cell k) (esc n) (esc (with-viol k)))))
      "<p class=\"muted\">Discriminant, verbatim from <code>fact-kind</code>: a"
@@ -593,7 +596,8 @@
 (defn register-section [runs]
   (let [rows (for [r runs rec (:register r)] [r rec])]
     (section
-     (str "Committed coordination records (" (count rows) ") &mdash; the SSoT register")
+     ;; literal U+2014 -- `section` passes its title through `esc`
+     (str "Committed coordination records (" (count rows) ") — the SSoT register")
      (str "Everything that reached " (code "store/commit-record!")
           " across all runs. A held proposal never appears here; that is the"
           " Governor doing its job, and the refusal table above cross-checks it.")
