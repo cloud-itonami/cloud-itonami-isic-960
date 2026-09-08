@@ -1,7 +1,7 @@
 (ns personalcareops.advisor
   "Proposal advisor for personal-care salon/service coordination.
    DETERMINISTIC DEMO ONLY: production requires real LLM with prompt injection safeguards."
-  (:require [clojure.string :as str]))
+  (:require [kotoba.lang.text :as str]))
 
 (defn advisability
   "Return advisability score (0–1) and reasoning for a proposal.
@@ -26,8 +26,8 @@
         ;; now portable.
         has-forbidden-words?
         (and (string? content)
-             (let [lc (str/lower-case content)]
-               (some #(str/includes? lc (str/lower-case %))
+             (let [lc (str/lower content)]
+               (some #(str/includes? lc (str/lower %))
                      ["allergy" "prescription" "medication" "treatment-plan"
                       "health-condition" "medical-decision" "clinical-judgment"
                       "アレルギー" "処方" "薬剤" "治療計画"

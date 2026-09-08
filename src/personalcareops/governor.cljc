@@ -16,7 +16,7 @@
      - :schedule-staff-shift-proposal — admin shift proposal only
      - :flag-safety-concern — facility/sanitation/client-welfare escalation only"
   (:require [personalcareops.store :as store]
-            [clojure.string :as str]))
+            [kotoba.lang.text :as str]))
 
 ;; ---------------------- hard checks ----------------------
 
