@@ -42,7 +42,7 @@
   read. Two builds of this file are byte-identical.
 
       clojure -M:dev:render-html [out-file]"
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [jp-go-dds.skin]
             [langgraph.graph :as g]
             [personalcareops.operation :as operation]
