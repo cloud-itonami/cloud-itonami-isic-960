@@ -18,12 +18,12 @@ clojure -M:dev:run
 
 ## Code Organization
 
-- `src/personalcareops/store.cljc` - Data store (SSoT)
-- `src/personalcareops/advisor.cljc` - Proposal advisor
-- `src/personalcareops/governor.cljc` - Safety decision logic
-- `src/personalcareops/operation.cljc` - Real compiled `langgraph.graph` StateGraph orchestration
-- `src/personalcareops/phase.cljc` - Rollout phase control
-- `src/personalcareops/sim.cljc` - Demo driver (runs the compiled StateGraph end-to-end)
+- `src/personalcareops/store.kotoba` - Data store (SSoT)
+- `src/personalcareops/advisor.kotoba` - Proposal advisor
+- `src/personalcareops/governor.kotoba` - Safety decision logic
+- `src/personalcareops/operation.kotoba` - Real compiled `langgraph.graph` StateGraph orchestration
+- `src/personalcareops/phase.kotoba` - Rollout phase control
+- `src/personalcareops/sim.kotoba` - Demo driver (runs the compiled StateGraph end-to-end)
 - `test/personalcareops/*_test.clj` - `clojure.test` suite (advisor, governor, phase, store, operation)
 
 ## Scope Guidelines
