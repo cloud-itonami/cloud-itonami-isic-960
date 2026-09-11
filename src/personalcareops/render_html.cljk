@@ -41,7 +41,7 @@
   ever `pr-str`-ed whole -- only explicitly named, deterministic keys are
   read. Two builds of this file are byte-identical.
 
-      clojure -M:dev:render-html [out-file]"
+      kbb -M:dev:render-html [out-file]"
   (:require [kotoba.lang.text :as str]
             [jp-go-dds.skin]
             [langgraph.graph :as g]
@@ -768,7 +768,7 @@
 
    (section
     "What this page is"
-    (str "Built by " (code "clojure -M:dev:render-html")
+    (str "Built by " (code "kbb -M:dev:render-html")
          ", which executes " (code "personalcareops.operation/build")
          " &mdash; a real compiled " (code "langgraph.graph") " StateGraph &mdash;"
          " over the real seed directory in " (code "personalcareops.store")
