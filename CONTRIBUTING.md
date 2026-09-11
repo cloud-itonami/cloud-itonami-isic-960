@@ -7,13 +7,13 @@ Thank you for your interest in contributing to this actor!
 ### Running Tests
 
 ```bash
-clojure -M:dev:test
+kbb -M:dev:test
 ```
 
 ### Running the Demo
 
 ```bash
-clojure -M:dev:run
+kbb -M:dev:run
 ```
 
 ## Code Organization
