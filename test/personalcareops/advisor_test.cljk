@@ -3,7 +3,7 @@
   `advisability` heuristic that `personalcareops.operation/advise-request`
   (the StateGraph's `:advise` node) dispatches to, unchanged from the
   pre-graph pipeline."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [personalcareops.store :as store]
             [personalcareops.advisor :as advisor]))
 

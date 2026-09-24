@@ -1,7 +1,7 @@
 (ns personalcareops.store-test
   "Tests for the ISIC-960 MemStore SSoT: client/service directories, the
   append-only ledger, and the coordination-log."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [personalcareops.store :as store]))
 
 (deftest client-lookup

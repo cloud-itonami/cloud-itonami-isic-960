@@ -1,6 +1,6 @@
 (ns personalcareops.governor-test
   "Tests for the three HARD, permanent, un-overridable governor checks."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [personalcareops.store :as store]
             [personalcareops.governor :as governor]))
 
