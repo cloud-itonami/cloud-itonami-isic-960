@@ -10,7 +10,7 @@
   violation were ever routed through human approval instead of straight
   to `:hold`, or if the ledger were written before a commit/hold actually
   happened)."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [langgraph.graph :as g]
             [personalcareops.operation :as operation]
             [personalcareops.store :as store]))

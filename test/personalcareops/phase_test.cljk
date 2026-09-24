@@ -3,7 +3,7 @@
   genuinely consulted by `personalcareops.operation`'s `:decide` node
   (see `operation-test`) -- previously they were defined and tested in
   isolation but never wired into any decision."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [personalcareops.phase :as phase]))
 
 (deftest phase-0-all-held
